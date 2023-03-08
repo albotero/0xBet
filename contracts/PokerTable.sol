@@ -160,7 +160,7 @@ contract PokerTable {
         uint8 prevPlayerIndex = s_currentPlayerIndex;
         uint8 nextPlayerIndex = calculateNextPlayer(prevPlayerIndex, s_players.length);
         s_currentPlayerIndex = nextPlayerIndex;
-        if (nextPlayerIndex < prevPlayerIndex) newRound();
+        if (prevPlayerIndex == s_currentButton) newRound();
         emit PokerTable__PlayerTurn(s_players[nextPlayerIndex].playerAddress);
     }
 
@@ -174,12 +174,29 @@ contract PokerTable {
     }
 
     function checkTurn() external OnlyPlayers GameStarted PlayerWithTurn {
-        if (s_betDoneInRound) revert PokerTable__NoCheckAllowed();
+        if (s_betDoneInRound || s_roundCount < 2) revert PokerTable__NoCheckAllowed();
         nextPlayerTurn();
     }
 
     function betToPot() external payable OnlyPlayers GameStarted PlayerWithTurn {
         if (msg.value < s_lastBet) revert PokerTable__InsufficientBet();
+        uint256 playersLength = s_players.length;
+        uint256 playersToUnfold;
+        if (s_roundCount == 1) {
+            /* Pre-Flop, bigBlind has bet, unfold cards */
+            uint256 bigBlindIndex = calculateNextPlayer(
+                calculateNextPlayer(s_currentButton, playersLength),
+                playersLength
+            );
+            if (msg.sender == s_players[bigBlindIndex].playerAddress) {
+                unchecked {
+                    // playerIndex base 1
+                    for (uint8 p = 0; p < playersLength; p++)
+                        playersToUnfold = playersToUnfold.appendNumberToData(p + 1);
+                    unfoldCards(playersToUnfold, false);
+                }
+            }
+        }
         s_lastBet = msg.value;
         s_betDoneInRound = true;
         nextPlayerTurn();
@@ -220,7 +237,7 @@ contract PokerTable {
             players[bigBlind].playerAddress
         );
         // Start rounds
-        newRound();
+        nextPlayerTurn();
     }
 
     function obtainedRandomCards(uint256[] calldata _randomCards) external {
@@ -237,19 +254,10 @@ contract PokerTable {
 
     function newRound() internal {
         uint8 roundCount = s_roundCount;
-        uint256 playersLength = s_players.length;
-        uint256 playersToUnfold;
-        //if (roundCount == 0 /* Blinds */) {} else
-        if (roundCount == 1 /* Pre-flop */) {
-            unchecked {
-                // playerIndex base 1
-                for (uint8 p = 0; p < playersLength; p++) playersToUnfold = playersToUnfold.appendNumberToData(p + 1);
-                unfoldCards(playersToUnfold, false);
-            }
-        } else if (roundCount == 2 /* Flop */) unfoldCommunityCard(3);
-        else if (roundCount == 3 /* Turn */) unfoldCommunityCard(1);
-        else if (roundCount == 4 /* River */) unfoldCommunityCard(1);
-        else if (roundCount == 5 /* Showdown */) finishGame();
+        if (roundCount == 1 /* Flop */) unfoldCommunityCard(3);
+        else if (roundCount == 2 /* Turn */) unfoldCommunityCard(1);
+        else if (roundCount == 3 /* River */) unfoldCommunityCard(1);
+        else if (roundCount == 4 /* Showdown */) finishGame();
         s_roundCount = roundCount + 1;
         s_betDoneInRound = false;
     }

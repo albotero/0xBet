@@ -77,9 +77,7 @@ const getRandomCards = ({ playersCount }) => {
                       getRandomCards({ playersCount: 2 })
                   )
               ).to.emit(pokerTable, "PokerTable__DeckShuffled")
-              // Bet with deployer's account
-              await pokerTable.connect(accounts[0]).betToPot({ value: val })
-              // Bet with player1's account
+              // Small blind
               await pokerTable.connect(accounts[1]).betToPot({ value: val })
               // Bet with an unregistered player
               await expect(pokerTable.connect(accounts[2]).betToPot({ value: val })).to.be.revertedWithCustomError(
@@ -115,8 +113,8 @@ const getRandomCards = ({ playersCount }) => {
               ).to.emit(pokerTable, "PokerTable__DeckShuffled")
               // Bet until game ends
               const val = ethers.utils.parseUnits("0.01", ERC20_BET_DECIMALS)
-              for (let i = 0; i < 4 * 5 - 1; i++) await pokerTable.connect(accounts[i % 4]).betToPot({ value: val })
-              await expect(pokerTable.connect(accounts[3]).betToPot({ value: val })).to.emit(
+              for (let i = 1; i < 4 * 4; i++) await pokerTable.connect(accounts[i % 4]).betToPot({ value: val })
+              await expect(pokerTable.connect(accounts[0]).betToPot({ value: val })).to.emit(
                   pokerTable,
                   "PokerTable__ShowDown"
               )
@@ -159,7 +157,7 @@ const getRandomCards = ({ playersCount }) => {
               pokerTable = pokerTable.connect(accounts[1])
               await pokerTable.registerPlayer()
               await pokerTable.startGame()
-              await expect(pokerTable.betToPot({ value: val })).to.be.revertedWithCustomError(
+              await expect(pokerTable.connect(accounts[0]).betToPot({ value: val })).to.be.revertedWithCustomError(
                   pokerTable,
                   "PokerTable__NotPlayersTurn"
               )
@@ -167,16 +165,15 @@ const getRandomCards = ({ playersCount }) => {
 
           it("Can't bet a lesser amount than previous bet", async function () {
               // Register player
-              await pokerTable.connect(accounts[1]).registerPlayer()
+              pokerTable = pokerTable.connect(accounts[1])
+              await pokerTable.registerPlayer()
               await pokerTable.startGame()
-              // Owner bet
-              await pokerTable
-                  .connect(accounts[0])
-                  .betToPot({ value: ethers.utils.parseUnits("0.02", ERC20_BET_DECIMALS) })
-              // Player1 bet
+              // Small blind
+              await pokerTable.betToPot({ value: ethers.utils.parseUnits("0.02", ERC20_BET_DECIMALS) })
+              // Big blind
               await expect(
                   pokerTable
-                      .connect(accounts[1])
+                      .connect(accounts[0])
                       .betToPot({ value: ethers.utils.parseUnits("0.01", ERC20_BET_DECIMALS) })
               ).to.be.revertedWithCustomError(pokerTable, "PokerTable__InsufficientBet")
           })
@@ -184,7 +181,8 @@ const getRandomCards = ({ playersCount }) => {
           it("Pass turn from last to first player", async function () {
               const val = ethers.utils.parseUnits("250", ERC20_BET_DECIMALS)
               // Register one player to allow betting
-              await pokerTable.connect(accounts[1]).registerPlayer()
+              pokerTable = pokerTable.connect(accounts[1])
+              await pokerTable.registerPlayer()
               await pokerTable.startGame()
               await expect(
                   vrfCoordinatorV2Mock.fulfillRandomWordsWithOverride(
@@ -194,29 +192,40 @@ const getRandomCards = ({ playersCount }) => {
                   )
               ).to.emit(pokerTable, "PokerTable__DeckShuffled")
               // Bet to pass turn to the next player
-              await pokerTable.connect(accounts[0]).betToPot({ value: val })
+              await pokerTable.betToPot({ value: val })
               let currentTurn = await pokerTable.getCurrentPlayer()
-              assert.equal(currentTurn.playerAddress, accounts[1].address)
-              // Bet to pass turn to the next player
-              await pokerTable.connect(accounts[1]).betToPot({ value: val })
-              currentTurn = await pokerTable.getCurrentPlayer()
               assert.equal(currentTurn.playerAddress, accounts[0].address)
+              // Bet to pass turn to the next player
+              await pokerTable.connect(accounts[0]).betToPot({ value: val })
+              currentTurn = await pokerTable.getCurrentPlayer()
+              assert.equal(currentTurn.playerAddress, accounts[1].address)
           })
 
           it("Player with turn folds", async function () {
               // Register some players
               for (let p = 1; p < 6; p++) await pokerTable.connect(accounts[p]).registerPlayer()
               await pokerTable.startGame()
-              // Owner folds
-              await expect(pokerTable.connect(accounts[0]).foldPlayer())
+              await expect(
+                  vrfCoordinatorV2Mock.fulfillRandomWordsWithOverride(
+                      await randomCards.s_lastRequestId(),
+                      randomCards.address,
+                      getRandomCards({ playersCount: 6 })
+                  )
+              ).to.emit(pokerTable, "PokerTable__DeckShuffled")
+              // Small and big blinds
+              const val = ethers.utils.parseUnits("250", ERC20_BET_DECIMALS)
+              await pokerTable.connect(accounts[1]).betToPot({ value: val })
+              await pokerTable.connect(accounts[2]).betToPot({ value: val })
+              // Player with turn folds
+              await expect(pokerTable.connect(accounts[3]).foldPlayer())
                   .to.emit(pokerTable, "PokerTable__PlayerTurn")
-                  .withArgs((address) => address == accounts[1].address)
+                  .withArgs((address) => address == accounts[4].address)
               // Check owner is folded
               const players = await pokerTable.getPlayers()
-              assert.isTrue(players[0].folded)
+              assert.isTrue(players[3].folded)
               // Check turn has passed to next player
               const currentTurn = await pokerTable.getCurrentPlayer()
-              assert.equal(currentTurn.playerAddress, accounts[1].address)
+              assert.equal(currentTurn.playerAddress, accounts[4].address)
           })
 
           it("Player without turn folds", async function () {
@@ -261,36 +270,56 @@ const getRandomCards = ({ playersCount }) => {
               )
           })
 
-          it("To check, it must be a player, game has to be started, and player has to have the turn", async function () {
+          it("To check, it must be a player, game has to be started, round has to be > pre-flop, and player has to have the turn", async function () {
+              pokerTable = pokerTable.connect(accounts[1])
               // OnlyPlayers
-              await expect(pokerTable.connect(accounts[1]).checkTurn()).to.be.revertedWithCustomError(
-                  pokerTable,
-                  "PokerTable__IsNotPlayer"
-              )
+              await expect(pokerTable.checkTurn()).to.be.revertedWithCustomError(pokerTable, "PokerTable__IsNotPlayer")
               // GameStarted
-              await expect(pokerTable.connect(accounts[0]).checkTurn()).to.be.revertedWithCustomError(
+              await pokerTable.registerPlayer()
+              await expect(pokerTable.checkTurn()).to.be.revertedWithCustomError(
                   pokerTable,
                   "PokerTable__NoOngoingGame"
               )
-              // PlayerWithTurn
-              pokerTable = pokerTable.connect(accounts[1])
-              await pokerTable.registerPlayer()
+              // Round > pre-flop
               await pokerTable.startGame()
+              await expect(
+                  vrfCoordinatorV2Mock.fulfillRandomWordsWithOverride(
+                      await randomCards.s_lastRequestId(),
+                      randomCards.address,
+                      getRandomCards({ playersCount: 2 })
+                  )
+              ).to.emit(pokerTable, "PokerTable__DeckShuffled")
               await expect(pokerTable.checkTurn()).to.be.revertedWithCustomError(
+                  pokerTable,
+                  "PokerTable__NoCheckAllowed"
+              )
+              // Small and big blinds
+              const val = ethers.utils.parseUnits("250", ERC20_BET_DECIMALS)
+              await pokerTable.connect(accounts[1]).betToPot({ value: val })
+              await pokerTable.connect(accounts[0]).betToPot({ value: val })
+              // PlayerWithTurn
+              await expect(pokerTable.connect(accounts[0]).checkTurn()).to.be.revertedWithCustomError(
                   pokerTable,
                   "PokerTable__NotPlayersTurn"
               )
               // Allow check
-              await pokerTable.connect(accounts[0]).checkTurn()
+              await pokerTable.connect(accounts[1]).checkTurn()
           })
 
           it("Only allows a player to check if no bets have been done in current round", async function () {
               await pokerTable.connect(accounts[1]).registerPlayer()
               await pokerTable.startGame()
+              await expect(
+                  vrfCoordinatorV2Mock.fulfillRandomWordsWithOverride(
+                      await randomCards.s_lastRequestId(),
+                      randomCards.address,
+                      getRandomCards({ playersCount: 2 })
+                  )
+              ).to.emit(pokerTable, "PokerTable__DeckShuffled")
               await pokerTable
-                  .connect(accounts[0])
+                  .connect(accounts[1])
                   .betToPot({ value: ethers.utils.parseUnits("0.01", ERC20_BET_DECIMALS) })
-              await expect(pokerTable.connect(accounts[1]).checkTurn()).to.be.revertedWithCustomError(
+              await expect(pokerTable.connect(accounts[0]).checkTurn()).to.be.revertedWithCustomError(
                   pokerTable,
                   "PokerTable__NoCheckAllowed"
               )
@@ -331,11 +360,11 @@ const getRandomCards = ({ playersCount }) => {
                           getRandomCards({ playersCount: 6 })
                       )
                   ).to.emit(pokerTable, "PokerTable__DeckShuffled")
-                  // Bet to get to the next round (pre-flop)
+                  // Small blind bet
                   const val = ethers.utils.parseUnits("0.01", ERC20_BET_DECIMALS)
-                  for (let i = 0; i < 5; i++) await pokerTable.connect(accounts[i]).betToPot({ value: val })
-                  // Unfold 2 cards to each player
-                  await expect(pokerTable.connect(accounts[5]).betToPot({ value: val }))
+                  await pokerTable.connect(accounts[1]).betToPot({ value: val })
+                  // Unfold 2 cards to each player after big blind bet
+                  await expect(pokerTable.connect(accounts[2]).betToPot({ value: val }))
                       .to.emit(pokerTable, "PokerTable__CardsUnfolded")
                       .withArgs(
                           (address) => address == accounts[0].address,
@@ -379,9 +408,9 @@ const getRandomCards = ({ playersCount }) => {
                   ).to.emit(pokerTable, "PokerTable__DeckShuffled")
                   // Bet to get to the next rounds (pre-flop and flop)
                   const val = ethers.utils.parseUnits("0.01", ERC20_BET_DECIMALS)
-                  for (let i = 0; i < 11; i++) await pokerTable.connect(accounts[i % 6]).betToPot({ value: val })
+                  for (let i = 1; i < 6; i++) await pokerTable.connect(accounts[i % 6]).betToPot({ value: val })
                   // Unfold first 3 community cards, in game is after two bet rounds
-                  await expect(pokerTable.connect(accounts[5]).betToPot({ value: val }))
+                  await expect(pokerTable.connect(accounts[0]).betToPot({ value: val }))
                       .to.emit(pokerTable, "PokerTable__CardsUnfolded")
                       .withArgs(
                           (address) => address == accounts[0].address,
@@ -426,26 +455,38 @@ const getRandomCards = ({ playersCount }) => {
                   assert.equal(button.playerAddress, accounts[0].address)
               })
 
-              it("Owner has the turn", async function () {
+              it("Small blind has the turn", async function () {
                   await pokerTable.startGame()
                   const currentPlayer = await pokerTable.getCurrentPlayer()
-                  assert.equal(currentPlayer.playerAddress, accounts[0].address)
+                  assert.equal(currentPlayer.playerAddress, accounts[1].address)
               })
 
-              it("Player1 bet", async function () {
+              it("Small and big blind bet", async function () {
                   const val = ethers.utils.parseUnits("0.01", ERC20_BET_DECIMALS)
                   await pokerTable.startGame()
-                  // Owner bet
-                  await pokerTable.connect(accounts[0]).betToPot({ value: val })
-                  // Player1 bet
-                  await expect(pokerTable.connect(accounts[1]).betToPot({ value: val.mul(2) }))
+                  await expect(
+                      vrfCoordinatorV2Mock.fulfillRandomWordsWithOverride(
+                          await randomCards.s_lastRequestId(),
+                          randomCards.address,
+                          getRandomCards({ playersCount: 6 })
+                      )
+                  ).to.emit(pokerTable, "PokerTable__DeckShuffled")
+                  // Small blind
+                  await expect(pokerTable.connect(accounts[1]).betToPot({ value: val }))
                       .to.emit(pokerTable, "PokerTable__Bet")
                       .withArgs(
                           (sender) => sender == accounts[1].address,
+                          (value) => value.toString() == val.toString()
+                      )
+                  assert.equal((await pokerTable.getLastBet()).toString(), val.toString())
+                  // Big blind
+                  await expect(pokerTable.connect(accounts[2]).betToPot({ value: val.mul(2) }))
+                      .to.emit(pokerTable, "PokerTable__Bet")
+                      .withArgs(
+                          (sender) => sender == accounts[2].address,
                           (value) => value.toString() == (BigInt(val) * BigInt(2)).toString()
                       )
-                  const lastBet = await pokerTable.getLastBet()
-                  assert.equal(lastBet.toString(), (BigInt(val) * BigInt(2)).toString())
+                  assert.equal((await pokerTable.getLastBet()).toString(), (BigInt(val) * BigInt(2)).toString())
               })
 
               it("Don't allow direct transfer to pot - Receive function", async function () {
@@ -467,19 +508,26 @@ const getRandomCards = ({ playersCount }) => {
                       )
                   ).to.emit(pokerTable, "PokerTable__DeckShuffled")
                   const currentPlayer = await pokerTable.getCurrentPlayer()
-                  assert(currentPlayer.playerAddress, accounts[0].address)
-                  await expect(pokerTable.connect(accounts[0]).removePlayer())
+                  assert(currentPlayer.playerAddress, accounts[1].address)
+                  await expect(pokerTable.connect(accounts[1]).removePlayer())
                       .to.emit(pokerTable, "PokerTable__PlayerTurn")
-                      .withArgs((address) => address == accounts[1].address)
+                      .withArgs((address) => address == accounts[2].address)
                   const nextPlayer = await pokerTable.getCurrentPlayer()
-                  assert.equal(nextPlayer.playerAddress, accounts[1].address)
+                  assert.equal(nextPlayer.playerAddress, accounts[2].address)
               })
 
               it("Player previous to the one with turn quits, update turn to keep it unchanged", async function () {
                   const val = ethers.utils.parseUnits("0.01", ERC20_BET_DECIMALS)
                   await pokerTable.startGame()
+                  await expect(
+                      vrfCoordinatorV2Mock.fulfillRandomWordsWithOverride(
+                          await randomCards.s_lastRequestId(),
+                          randomCards.address,
+                          getRandomCards({ playersCount: 6 })
+                      )
+                  ).to.emit(pokerTable, "PokerTable__DeckShuffled")
                   // Bet to pass turn to the 3rd player
-                  for (let p = 0; p < 3; p++) await pokerTable.connect(accounts[p]).betToPot({ value: val })
+                  for (let p = 1; p < 3; p++) await pokerTable.connect(accounts[p]).betToPot({ value: val })
                   const prevTurn = await pokerTable.getCurrentPlayer()
                   // Remove player4
                   await pokerTable.connect(accounts[4]).removePlayer()
@@ -491,8 +539,15 @@ const getRandomCards = ({ playersCount }) => {
               it("Player posterior to the one with turn quits, update turn to keep it unchanged", async function () {
                   const val = ethers.utils.parseUnits("0.01", ERC20_BET_DECIMALS)
                   await pokerTable.startGame()
+                  await expect(
+                      vrfCoordinatorV2Mock.fulfillRandomWordsWithOverride(
+                          await randomCards.s_lastRequestId(),
+                          randomCards.address,
+                          getRandomCards({ playersCount: 6 })
+                      )
+                  ).to.emit(pokerTable, "PokerTable__DeckShuffled")
                   // Bet to pass turn to the 4th player
-                  for (let p = 0; p < 4; p++) await pokerTable.connect(accounts[p]).betToPot({ value: val })
+                  for (let p = 1; p < 4; p++) await pokerTable.connect(accounts[p]).betToPot({ value: val })
                   const prevTurn = await pokerTable.getCurrentPlayer()
                   // Remove player1
                   await pokerTable.connect(accounts[1]).removePlayer()
@@ -680,6 +735,13 @@ const getRandomCards = ({ playersCount }) => {
                   // Register some players
                   for (let p = 1; p < 6; p++) await pokerTable.connect(accounts[p]).registerPlayer()
                   await pokerTable.startGame()
+                  await expect(
+                      vrfCoordinatorV2Mock.fulfillRandomWordsWithOverride(
+                          await randomCards.s_lastRequestId(),
+                          randomCards.address,
+                          getRandomCards({ playersCount: 6 })
+                      )
+                  ).to.emit(pokerTable, "PokerTable__DeckShuffled")
               })
 
               it("Finish game if all players but one fold and transfers the pot", async function () {
@@ -687,14 +749,14 @@ const getRandomCards = ({ playersCount }) => {
                   const player5InitialBalance = await pokerTable.getPlayerBalance(accounts[5].address)
                   let potValue = BigInt(0)
                   // Fold players
-                  for (let p = 0; p < 4; p++) {
+                  for (let p = 1; p < 5; p++) {
                       pokerTable = pokerTable.connect(accounts[p])
                       await pokerTable.betToPot({ value: val })
                       potValue += BigInt(val)
                       await pokerTable.foldPlayer()
                   }
                   // Fold other player, only one left, game should finish
-                  await expect(pokerTable.connect(accounts[4]).foldPlayer())
+                  await expect(pokerTable.connect(accounts[0]).foldPlayer())
                       .to.emit(pokerTable, "PokerTable__WinnersAwarded")
                       .withArgs((addresses) => addresses[0] == accounts[5].address)
                   // All money should have been sent to the last player
@@ -722,14 +784,14 @@ const getRandomCards = ({ playersCount }) => {
                   const notReceiverMock = await ethers.getContractAt(_notReceiverMock.abi, _notReceiverMock.address)
                   await notReceiverMock.register(pokerTable.address)
                   // Fold players
-                  for (let p = 0; p < 5; p++) {
+                  for (let p = 1; p < 6; p++) {
                       pokerTable = pokerTable.connect(accounts[p])
                       await pokerTable.betToPot({ value: val })
                       await pokerTable.connect(accounts[p]).foldPlayer()
                   }
                   // Fold other player, only one left, game should finish
                   const potValue = await pokerTable.getBalance()
-                  await expect(pokerTable.connect(accounts[5]).foldPlayer())
+                  await expect(pokerTable.connect(accounts[0]).foldPlayer())
                       .to.emit(pokerTable, "PokerTable__TransferFailed")
                       .withArgs(
                           (address) => address == notReceiverMock.address,
@@ -739,27 +801,27 @@ const getRandomCards = ({ playersCount }) => {
 
               it("Destroy PokerTable contract if all players quit and transfers the pot", async function () {
                   const val = ethers.utils.parseUnits("250", ERC20_BET_DECIMALS)
-                  const player5InitialBalance = await pokerTable.getPlayerBalance(accounts[5].address)
+                  const winnerInitialBalance = await pokerTable.getPlayerBalance(accounts[0].address)
                   let potValue = BigInt(0)
                   // Bet with players accounts and quit
-                  for (let p = 0; p < 4; p++) {
+                  for (let p = 1; p < 5; p++) {
                       pokerTable = pokerTable.connect(accounts[p])
                       await pokerTable.betToPot({ value: val })
                       potValue += BigInt(val)
                       pokerTable.removePlayer()
                   }
                   // Two players remain, one quits
-                  await pokerTable.connect(accounts[4]).betToPot({ value: val })
+                  await pokerTable.connect(accounts[5]).betToPot({ value: val })
                   potValue += BigInt(val)
-                  await expect(pokerTable.connect(accounts[4]).removePlayer())
+                  await expect(pokerTable.connect(accounts[5]).removePlayer())
                       .to.emit(pokerTable, "PokerTable__OnlyOnePlayerLeft")
-                      .withArgs((receiver) => receiver == accounts[5].address)
+                      .withArgs((receiver) => receiver == accounts[0].address)
                   // Contract should be destroyed
                   const contractCode = await ethers.provider.getCode(pokerTable.address)
                   assert.equal(contractCode, "0x")
                   // All money should have been sent to the last player
-                  const player5EndingBalance = await ethers.provider.getBalance(accounts[5].address)
-                  assert.equal(player5EndingBalance.toString(), player5InitialBalance.add(potValue).toString())
+                  const winnerEndingBalance = await ethers.provider.getBalance(accounts[0].address)
+                  assert.equal(winnerEndingBalance.toString(), winnerInitialBalance.add(potValue).toString())
               })
           })
 
@@ -789,33 +851,27 @@ const getRandomCards = ({ playersCount }) => {
                           getRandomCards({ playersCount: 5 })
                       )
                   ).to.emit(pokerTable, "PokerTable__DeckShuffled")
-                  /* Blind bets */
-                  await play({ player: 0, raise: 1 }) // Small blind
-                  await play({ player: 1, raise: 2 }) // Big blind
-                  await play({ player: 2, call: true })
-                  await play({ player: 3, call: true })
-                  await play({ player: 4, raise: 3 })
                   /* Pre-flop */
-                  await play({ player: 0, check: true })
-                  await play({ player: 1, check: true })
-                  await play({ player: 2, raise: 5 })
+                  await play({ player: 1, raise: 1 }) // Small blind
+                  await play({ player: 2, raise: 2 }) // Big blind
                   await play({ player: 3, call: true })
                   await play({ player: 4, call: true })
+                  await play({ player: 0, raise: 3 })
                   /* Flop */
-                  await play({ player: 0, call: true })
-                  await play({ player: 1, fold: true })
-                  await play({ player: 2, raise: 10 })
-                  await play({ player: 3, call: true })
-                  await play({ player: 4, raise: 15 })
+                  await play({ player: 1, call: true })
+                  await play({ player: 2, fold: true })
+                  await play({ player: 3, raise: 10 })
+                  await play({ player: 4, call: true })
+                  await play({ player: 0, raise: 15 })
                   /* Turn */
-                  await play({ player: 0, call: true })
-                  await play({ player: 2, call: true })
+                  await play({ player: 1, call: true })
                   await play({ player: 3, call: true })
-                  await play({ player: 4, raise: 20 })
+                  await play({ player: 4, call: true })
+                  await play({ player: 0, raise: 20 })
                   /* River */
-                  await play({ player: 0, call: true })
-                  await play({ player: 2, raise: 25 })
-                  await play({ player: 3, call: true })
+                  await play({ player: 1, call: true })
+                  await play({ player: 3, raise: 25 })
+                  await play({ player: 4, call: true })
                   /* Showdown */
                   let playersScores, awardedWinners
                   const potBalance = await pokerTable.getBalance()
@@ -824,7 +880,7 @@ const getRandomCards = ({ playersCount }) => {
                       const p = accounts[i].address
                       previousPlayersBalances[p] = await pokerTable.getPlayerBalance(p)
                   }
-                  await expect(play({ player: 4, fold: true }))
+                  await expect(play({ player: 0, fold: true }))
                       .to.emit(pokerTable, "PokerTable__ShowDown")
                       .withArgs((players) => (playersScores = players || true))
                       .to.emit(pokerTable, "PokerTable__WinnersAwarded")
