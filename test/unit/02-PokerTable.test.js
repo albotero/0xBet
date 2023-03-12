@@ -864,8 +864,8 @@ const getRandomCards = ({ playersCount }) => {
                   await play({ player: 4, call: true })
                   await play({ player: 0, raise: 15 })
                   /* Turn */
-                  await play({ player: 1, call: true })
-                  await play({ player: 3, call: true })
+                  await play({ player: 1, check: true })
+                  await play({ player: 3, check: true })
                   await play({ player: 4, call: true })
                   await play({ player: 0, raise: 20 })
                   /* River */
